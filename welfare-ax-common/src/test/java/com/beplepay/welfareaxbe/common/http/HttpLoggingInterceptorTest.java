@@ -5,13 +5,17 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.MDC;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.ClientHttpRequestExecution;
@@ -38,6 +42,12 @@ class HttpLoggingInterceptorTest {
     @BeforeEach
     void setUp() {
         interceptor = new HttpLoggingInterceptor();
+    }
+
+    @AfterEach
+    void tearDown() {
+        // 테스트 간 MDC 오염 방지
+        MDC.remove("traceId");
     }
 
     @Test
@@ -124,5 +134,44 @@ class HttpLoggingInterceptorTest {
         HttpHeaders masked = interceptor.maskSensitiveHeaders(headers);
 
         assertThat(masked.getFirst("authorization")).isEqualTo("****");
+    }
+
+    @Test
+    void intercept_MDC_traceId있으면_X_Trace_Id헤더전파() throws IOException {
+        MDC.put("traceId", "test-trace-id-1234");
+
+        MockClientHttpResponse mockResponse = new MockClientHttpResponse(
+                new ByteArrayInputStream("{}".getBytes()), HttpStatus.OK);
+        mockResponse.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+
+        // execution.execute()에 전달된 HttpRequest를 캡처
+        ArgumentCaptor<HttpRequest> requestCaptor = ArgumentCaptor.forClass(HttpRequest.class);
+        given(execution.execute(requestCaptor.capture(), any())).willReturn(mockResponse);
+
+        MockClientHttpRequest request = new MockClientHttpRequest(HttpMethod.GET, URI.create("https://example.com/api"));
+        interceptor.intercept(request, new byte[0], execution);
+
+        // 외부 요청 헤더에 X-Trace-Id가 MDC traceId 값으로 추가되어야 한다
+        assertThat(requestCaptor.getValue().getHeaders().getFirst("X-Trace-Id"))
+                .isEqualTo("test-trace-id-1234");
+    }
+
+    @Test
+    void intercept_MDC_traceId없으면_X_Trace_Id헤더없음() throws IOException {
+        // MDC에 traceId 없는 상태 (TraceIdFilter 미적용 환경)
+        MDC.remove("traceId");
+
+        MockClientHttpResponse mockResponse = new MockClientHttpResponse(
+                new ByteArrayInputStream("{}".getBytes()), HttpStatus.OK);
+        mockResponse.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+
+        ArgumentCaptor<HttpRequest> requestCaptor = ArgumentCaptor.forClass(HttpRequest.class);
+        given(execution.execute(requestCaptor.capture(), any())).willReturn(mockResponse);
+
+        MockClientHttpRequest request = new MockClientHttpRequest(HttpMethod.GET, URI.create("https://example.com/api"));
+        interceptor.intercept(request, new byte[0], execution);
+
+        // MDC에 traceId가 없으면 외부 요청 헤더에 X-Trace-Id가 추가되지 않아야 한다
+        assertThat(requestCaptor.getValue().getHeaders().getFirst("X-Trace-Id")).isNull();
     }
 }

@@ -10,6 +10,7 @@ import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRequest;
 import org.springframework.http.HttpStatusCode;
@@ -17,6 +18,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.ClientHttpResponse;
+import org.springframework.http.client.support.HttpRequestWrapper;
 import org.springframework.util.StreamUtils;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -62,12 +64,49 @@ public class HttpLoggingInterceptor implements ClientHttpRequestInterceptor {
     public ClientHttpResponse intercept(
             HttpRequest request, byte[] body, ClientHttpRequestExecution execution
     ) throws IOException {
-        logRequest(request, body);
-        ClientHttpResponse response = execution.execute(request, body);
+        // MDC traceId가 있으면 외부 요청 헤더에 전파
+        HttpRequest requestToExecute = propagateTraceId(request);
+        logRequest(requestToExecute, body);
+        ClientHttpResponse response = execution.execute(requestToExecute, body);
         // 응답 Body 로깅 후 호출자가 재읽기 가능하도록 스트림을 버퍼링
         BufferingClientHttpResponseWrapper buffered = new BufferingClientHttpResponseWrapper(response);
         logResponse(buffered);
         return buffered;
+    }
+
+    /**
+     * MDC에 저장된 traceId를 외부 요청 헤더 {@code X-Trace-Id}에 추가한다.
+     * MDC에 traceId가 없으면 원본 요청을 그대로 반환한다.
+     *
+     * <p>{@link org.springframework.http.client.ClientHttpRequestInterceptor}의 {@code HttpRequest}는
+     * 불변 헤더를 가질 수 있으므로 {@link HttpRequestWrapper}로 래핑하여 헤더를 추가한다.
+     *
+     * @param request 원본 외부 HTTP 요청
+     * @return traceId가 헤더에 추가된 요청 (traceId 없으면 원본 반환)
+     */
+    private HttpRequest propagateTraceId(HttpRequest request) {
+        String traceId = MDC.get("traceId");
+        // MDC에 traceId가 없으면 TraceIdFilter 미적용 환경 — 원본 요청 그대로 사용
+        if (traceId == null) {
+            return request;
+        }
+        return new HttpRequestWrapper(request) {
+            // 헤더 객체를 한 번만 생성하여 getHeaders() 반복 호출 시 불필요한 재생성을 방지
+            private final HttpHeaders propagated = buildPropagated();
+
+            private HttpHeaders buildPropagated() {
+                HttpHeaders h = new HttpHeaders();
+                h.putAll(super.getHeaders());
+                // 인바운드에서 수신한 traceId를 아웃바운드 요청으로 전파
+                h.set("X-Trace-Id", traceId);
+                return HttpHeaders.readOnlyHttpHeaders(h);
+            }
+
+            @Override
+            public HttpHeaders getHeaders() {
+                return propagated;
+            }
+        };
     }
 
     /**
